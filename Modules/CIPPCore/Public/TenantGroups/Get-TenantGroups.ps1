@@ -12,6 +12,8 @@ if (-not $script:TenantGroupsResultCache) {
     $script:TenantGroupsResultCache = @{}
 }
 
+$script:TenantGroupsCacheTTL = (New-TimeSpan -Minutes 5)
+
 function Get-TenantGroups {
     <#
     .SYNOPSIS
@@ -49,8 +51,9 @@ function Get-TenantGroups {
         }
     }
 
-    # Load table data into cache if not already loaded
-    if (-not $script:TenantGroupsCache.Groups -or -not $script:TenantGroupsCache.Members -or $SkipCache) {
+    # Load table data into cache if not already loaded or expired
+    $CacheExpired = $script:TenantGroupsCache.LastRefresh -and ((Get-Date) - $script:TenantGroupsCache.LastRefresh) -gt $script:TenantGroupsCacheTTL
+    if (-not $script:TenantGroupsCache.Groups -or -not $script:TenantGroupsCache.Members -or $SkipCache -or $CacheExpired) {
         Write-Verbose 'Loading TenantGroups and TenantGroupMembers tables into cache'
 
         $GroupTable = Get-CippTable -tablename 'TenantGroups'
@@ -62,11 +65,15 @@ function Get-TenantGroups {
         $script:TenantGroupsCache.Groups = @(Get-CIPPAzDataTableEntity @GroupTable)
         $script:TenantGroupsCache.Members = @(Get-CIPPAzDataTableEntity @MembersTable)
         $script:TenantGroupsCache.LastRefresh = Get-Date
+        $script:TenantGroupsResultCache = @{}
 
         # Build MembersByGroup index: GroupId -> array of member objects
         $script:TenantGroupsCache.MembersByGroup = @{}
         foreach ($Member in $script:TenantGroupsCache.Members) {
             $GId = $Member.GroupId
+            if (-not $GId) {
+                continue
+            }
             if (-not $script:TenantGroupsCache.MembersByGroup.ContainsKey($GId)) {
                 $script:TenantGroupsCache.MembersByGroup[$GId] = [System.Collections.Generic.List[object]]::new()
             }
@@ -137,6 +144,7 @@ function Get-TenantGroups {
                             Id          = $Group.RowKey
                             Name        = $Group.Name
                             Description = $Group.Description
+                            GroupType   = $Group.GroupType ?? 'static'
                         })
                 }
             }
@@ -156,6 +164,7 @@ function Get-TenantGroups {
             if ($GroupMembers) {
                 foreach ($Member in $GroupMembers) {
                     # Use indexed lookup instead of Where-Object
+                    if (!$Member.customerId) { continue }
                     $Tenant = $TenantByCustomerId[$Member.customerId]
                     if ($Tenant) {
                         $MembersList.Add(@{
